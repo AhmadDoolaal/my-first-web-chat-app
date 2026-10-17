@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 
-{% block title %}Dashboard{% endblock %}
+{% block title%}Dashboard{% endblock%}
 
-{% block extra_css %}
+{% block extra_css%}
 <style>
     .app-shell {
         display: grid;
@@ -208,13 +208,24 @@
         padding: 10px;
         background: transparent;
         border: 1px dashed var(--panel-border);
-        border-radius: 10px;
         color: var(--text-muted);
         font-size: 13px;
         cursor: pointer;
         transition: var(--transition);
     }
     .create-room-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    .auth-required {
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        text-align: center;
+        padding: 40px;
+        color: var(--text-muted);
+    }
+    .auth-required h3 { color: var(--text); margin-bottom: 8px; }
 
     @media (max-width: 900px) {
         .app-shell { grid-template-columns: 1fr; height: auto; }
@@ -223,9 +234,9 @@
         .main-panel { grid-column: 1; }
     }
 </style>
-{% endblock %}
+{% endblock%}
 
-{% block content %}
+{% block content%}
 <nav class="navbar top-nav">
     <div class="nav-brand">
         <div class="brand-mark">YT</div>
@@ -233,15 +244,14 @@
     </div>
     <div class="nav-actions">
         <span class="user-chip">
-            <span class="status-dot online" id="myStatusDot"></span>
+            <span class="status-dot" id="myStatusDot"></span>
             <span id="myUsername">{{ user.username }}</span>
         </span>
         <a href="{{ url_for('logout') }}" class="btn btn-ghost btn-small">Logout</a>
     </div>
 </nav>
 
-<div class="app-shell">
-    <!-- Left: Rooms -->
+<div class="app-shell" id="appShell" style="display:none;">
     <aside class="sidebar">
         <h3>Rooms</h3>
         <div id="roomsList">
@@ -255,7 +265,6 @@
         <button class="create-room-btn" id="createRoomBtn">+ New Room</button>
     </aside>
 
-    <!-- Center: Chat -->
     <section class="main-panel">
         <header class="chat-header">
             <div class="room-badge" id="roomBadge">#</div>
@@ -274,12 +283,11 @@
         </div>
 
         <div class="composer">
-            <input type="text" id="messageInput" placeholder="Type a message..." autocomplete="off">
-            <button class="btn btn-primary btn-small" id="sendBtn">Send</button>
+            <input type="text" id="messageInput" placeholder="Type a message..." autocomplete="off" disabled>
+            <button class="btn btn-primary btn-small" id="sendBtn" disabled>Send</button>
         </div>
     </section>
 
-    <!-- Right: Users -->
     <aside class="right-sidebar">
         <h3>Online Users</h3>
         <div id="usersList">
@@ -293,6 +301,12 @@
     </aside>
 </div>
 
+<div class="auth-required" id="authOverlay">
+    <h3>Authentication Required</h3>
+    <p>Please log in to use the chat.</p>
+    <a href="{{ url_for('login') }}" class="btn btn-primary">Go to Login</a>
+</div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
 <script>
     const currentUserId = {{ user.id }};
@@ -301,7 +315,11 @@
     let activeRoomId = null;
     let activeRecipientId = null;
     let activeRoomName = null;
+    let isAuthenticated = false;
+    let isSocketReady = false;
 
+    const appShell = document.getElementById("appShell");
+    const authOverlay = document.getElementById("authOverlay");
     const roomsList = document.getElementById("roomsList");
     const usersList = document.getElementById("usersList");
     const messagesContainer = document.getElementById("messagesContainer");
@@ -311,28 +329,70 @@
     const roomSub = document.getElementById("roomSub");
     const roomBadge = document.getElementById("roomBadge");
     const createRoomBtn = document.getElementById("createRoomBtn");
+    const myStatusDot = document.getElementById("myStatusDot");
+    const myUsername = document.getElementById("myUsername");
 
     socket.on("connect", () => {
-        console.log("Connected to socket");
+        console.log("[Socket] Connected");
+        isSocketReady = true;
+    });
+
+    socket.on("disconnect", () => {
+        console.log("[Socket] Disconnected");
+        isSocketReady = false;
+    });
+
+    socket.on("auth_ok", (data) => {
+        console.log("[Socket] Auth OK:", data);
+        isAuthenticated = true;
+        myUsername.textContent = data.username || "{{ user.username }}";
+        myStatusDot.className = "status-dot online";
+        authOverlay.style.display = "none";
+        appShell.style.display = "grid";
+        enableComposer();
+    });
+
+    socket.on("auth_required", (data) => {
+        console.log("[Socket] Auth required:", data);
+        isAuthenticated = false;
+        authOverlay.style.display = "flex";
+        appShell.style.display = "none";
+        disableComposer();
+    });
+
+    socket.on("error", (data) => {
+        console.log("[Socket] Error:", data);
+        alert(data.message || "Socket error");
     });
 
     socket.on("user_status", (data) => {
+        console.log("[Socket] User status:", data);
         updateUserStatus(data.user_id, data.is_online);
         if (data.user_id === currentUserId) {
-            const dot = document.getElementById("myStatusDot");
-            if (dot) dot.className = "status-dot " + (data.is_online ? "online" : "");
+            myStatusDot.className = "status-dot " + (data.is_online ? "online" : "");
         }
     });
 
     socket.on("joined", (data) => {
-        console.log("Joined room", data.room_id);
+        console.log("[Socket] Joined room:", data.room_id);
     });
 
     socket.on("new_message", (msg) => {
+        console.log("[Socket] New message:", msg);
         appendMessage(msg, false);
-        // Scroll to bottom
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
     });
+
+    function enableComposer() {
+        messageInput.disabled = false;
+        sendBtn.disabled = false;
+        messageInput.focus();
+    }
+
+    function disableComposer() {
+        messageInput.disabled = true;
+        sendBtn.disabled = true;
+    }
 
     function updateUserStatus(userId, isOnline) {
         const items = usersList.querySelectorAll(".user-item");
@@ -342,36 +402,6 @@
                 if (dot) dot.className = "status-dot " + (isOnline ? "online" : "");
             }
         });
-    }
-
-    function selectRoom(roomId, roomName) {
-        activeRoomId = roomId;
-        activeRecipientId = null;
-        activeRoomName = roomName;
-
-        // UI
-        roomTitle.textContent = "# " + roomName;
-        roomSub.textContent = "Public room · " + roomName;
-        roomBadge.textContent = "#";
-        setActiveItem(roomsList, roomId);
-        setActiveItem(usersList, null);
-
-        loadMessages(roomId);
-        joinSocketRoom(roomId);
-    }
-
-    function startDM(userId, username) {
-        activeRecipientId = userId;
-        activeRoomId = null;
-        activeRoomName = username;
-
-        roomTitle.textContent = username;
-        roomSub.textContent = "Direct message";
-        roomBadge.textContent = username.charAt(0).toUpperCase();
-        setActiveItem(usersList, userId);
-        setActiveItem(roomsList, null);
-
-        loadDM(userId);
     }
 
     function setActiveItem(list, activeId) {
@@ -386,23 +416,54 @@
         });
     }
 
-    function joinSocketRoom(roomId) {
+    function selectRoom(roomId, roomName) {
+        if (!isAuthenticated || !isSocketReady) return;
+        activeRoomId = roomId;
+        activeRecipientId = null;
+        activeRoomName = roomName;
+        roomTitle.textContent = "# " + roomName;
+        roomSub.textContent = "Public room · " + roomName;
+        roomBadge.textContent = "#";
+        setActiveItem(roomsList, roomId);
+        setActiveItem(usersList, null);
         socket.emit("join", { room_id: roomId });
+        loadMessages(roomId);
+    }
+
+    function startDM(userId, username) {
+        if (!isAuthenticated || !isSocketReady) return;
+        activeRecipientId = userId;
+        activeRoomId = null;
+        activeRoomName = username;
+        roomTitle.textContent = username;
+        roomSub.textContent = "Direct message";
+        roomBadge.textContent = username.charAt(0).toUpperCase();
+        setActiveItem(usersList, userId);
+        setActiveItem(roomsList, null);
+        loadDM(userId);
     }
 
     async function loadMessages(roomId) {
-        const res = await fetch(`/api/messages/${roomId}`);
-        const msgs = await res.json();
-        renderMessages(msgs, "room");
+        try {
+            const res = await fetch(`/api/messages/${roomId}`);
+            const msgs = await res.json();
+            renderMessages(msgs);
+        } catch (e) {
+            console.error("Failed to load messages:", e);
+        }
     }
 
     async function loadDM(userId) {
-        const res = await fetch(`/api/dm/${userId}`);
-        const msgs = await res.json();
-        renderMessages(msgs, "dm");
+        try {
+            const res = await fetch(`/api/dm/${userId}`);
+            const msgs = await res.json();
+            renderMessages(msgs);
+        } catch (e) {
+            console.error("Failed to load DM messages:", e);
+        }
     }
 
-    function renderMessages(msgs, type) {
+    function renderMessages(msgs) {
         messagesContainer.innerHTML = "";
         if (msgs.length === 0) {
             messagesContainer.innerHTML = `
@@ -422,35 +483,34 @@
         if (initial && messagesContainer.querySelector(".empty-state")) {
             messagesContainer.innerHTML = "";
         }
-
         const div = document.createElement("div");
         div.className = "msg " + (msg.user_id === currentUserId ? "own" : "other");
-
         const time = new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-
         div.innerHTML = `
             <div class="msg-bubble">${escapeHtml(msg.content)}</div>
-            <div class="msg-meta">${msg.username} · ${time}</div>
+            <div class="msg-meta">${escapeHtml(msg.username || "Unknown")} · ${time}</div>
         `;
         messagesContainer.appendChild(div);
     }
 
+    function escapeHtml(text) {
+        const d = document.createElement("div");
+        d.textContent = text || "";
+        return d.innerHTML;
+    }
+
     async function sendMessage() {
+        if (!isAuthenticated || !isSocketReady) return;
         const content = messageInput.value.trim();
         if (!content) return;
-
         const payload = { content };
-
         if (activeRoomId) {
             payload.room_id = activeRoomId;
             socket.emit("send_message", payload);
         } else if (activeRecipientId) {
             payload.recipient_id = activeRecipientId;
             socket.emit("send_message", payload);
-        } else {
-            return;
         }
-
         messageInput.value = "";
     }
 
@@ -460,30 +520,31 @@
     });
 
     createRoomBtn.addEventListener("click", async () => {
+        if (!isAuthenticated) return;
         const name = prompt("Enter room name:");
         if (!name) return;
-        const res = await fetch("/api/create_room", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name })
-        });
-        if (res.ok) {
-            const room = await res.json();
-            const div = document.createElement("div");
-            div.className = "room-item";
-            div.dataset.roomId = room.id;
-            div.onclick = () => selectRoom(room.id, room.name);
-            div.innerHTML = `<span>#</span><span>${escapeHtml(room.name)}</span>`;
-            roomsList.appendChild(div);
-        } else {
-            alert("Failed to create room");
+        try {
+            const res = await fetch("/api/create_room", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name })
+            });
+            if (res.ok) {
+                const room = await res.json();
+                const div = document.createElement("div");
+                div.className = "room-item";
+                div.dataset.roomId = room.id;
+                div.onclick = () => selectRoom(room.id, room.name);
+                div.innerHTML = `<span>#</span><span>${escapeHtml(room.name)}</span>`;
+                roomsList.appendChild(div);
+            } else {
+                alert("Failed to create room");
+            }
+        } catch (e) {
+            alert("Error creating room");
         }
     });
 
-    function escapeHtml(text) {
-        const d = document.createElement("div");
-        d.textContent = text;
-        return d.innerHTML;
-    }
+    console.log("[Chat] Initializing for user", currentUserId);
 </script>
-{% endblock %}
+{% endblock%}

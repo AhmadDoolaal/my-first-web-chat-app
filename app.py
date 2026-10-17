@@ -15,10 +15,34 @@ Features:
 import os
 from datetime import datetime, timezone
 from werkzeug.security import generate_password_hash, check_password_hash
+from sqlalchemy import or_, and_
 
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, abort
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_sqlalchemy import SQLAlchemy
+
+# --------------------------------------------------------------------------- #
+# Patch for Flask 3.x / Werkzeug 3.x compatibility with Flask-SocketIO.
+# Flask-SocketIO tries to set ctx.session on the RequestContext, but newer
+# Werkzeug removed the setter. We add a setter that simply ignores the value
+# since we track users via sid_to_user mapping instead of flask.session.
+# --------------------------------------------------------------------------- #
+from flask.ctx import RequestContext
+
+if not hasattr(RequestContext, "session_setter_patched"):
+    _orig_session_getter = RequestContext.session.fget
+
+    def _session_getter(self):
+        try:
+            return _orig_session_getter(self)
+        except (AttributeError, RuntimeError):
+            return {}
+
+    def _session_setter(self, value):
+        pass  # Ignore - we use sid_to_user for auth tracking
+
+    RequestContext.session = property(_session_getter, _session_setter)
+    RequestContext.session_setter_patched = True
 
 # --------------------------------------------------------------------------- #
 # App configuration
@@ -31,7 +55,10 @@ app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{os.path.join(BASE_DIR, 'ins
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+
+# Map socket.io session IDs to user IDs for tracking connected users
+sid_to_user = {}
 
 # --------------------------------------------------------------------------- #
 # Database models
@@ -144,6 +171,9 @@ def register():
         if User.query.filter_by(username=username).first():
             return render_template("register.html", error="Username already taken.")
 
+        if len(password) < 4:
+            return render_template("register.html", error="Password must be at least 4 characters.")
+
         user = User(username=username)
         user.set_password(password)
         db.session.add(user)
@@ -175,6 +205,13 @@ def login():
 
 @app.route("/logout")
 def logout():
+    uid = session.get("user_id")
+    if uid:
+        user = db.session.get(User, uid)
+        if user:
+            user.is_online = False
+            user.last_seen = datetime.now(timezone.utc)
+            db.session.commit()
     session.clear()
     return redirect(url_for("login"))
 
@@ -183,6 +220,9 @@ def logout():
 @login_required
 def dashboard():
     user = current_user()
+    if not user:
+        session.clear()
+        return redirect(url_for("login"))
     rooms = Room.query.order_by(Room.created_at.desc()).all()
     users = User.query.filter(User.id != user.id).all()
     return render_template("chat.html", user=user, rooms=rooms, users=users)
@@ -228,9 +268,9 @@ def api_dm(other_user_id):
     msgs = (
         Message.query.filter(
             Message.room_id.is_(None),
-            db.or_(
-                db.and_(Message.user_id == me.id, Message.recipient_id == other_user_id),
-                db.and_(Message.user_id == other_user_id, Message.recipient_id == me.id),
+            or_(
+                and_(Message.user_id == me.id, Message.recipient_id == other_user_id),
+                and_(Message.user_id == other_user_id, Message.recipient_id == me.id),
             ),
         )
         .order_by(Message.created_at.asc())
@@ -257,22 +297,34 @@ def api_create_room():
 # --------------------------------------------------------------------------- #
 # SocketIO events
 # --------------------------------------------------------------------------- #
+def get_user_from_sid(sid):
+    return sid_to_user.get(sid)
+
+
 @socketio.on("connect")
 def on_connect():
-    if "user_id" not in session:
-        return False  # reject connection
-    user = current_user()
-    if user:
-        user.is_online = True
-        user.last_seen = datetime.now(timezone.utc)
-        db.session.commit()
-        emit("user_status", {"user_id": user.id, "is_online": True}, broadcast=True)
+    """Allow connection, mark user online if authenticated via session cookie."""
+    uid = session.get("user_id")
+    if uid:
+        user = db.session.get(User, uid)
+        if user:
+            sid_to_user[request.sid] = user.id
+            user.is_online = True
+            user.last_seen = datetime.now(timezone.utc)
+            db.session.commit()
+            # Join personal room so DMs work
+            join_room(str(user.id))
+            emit("user_status", {"user_id": user.id, "is_online": True}, broadcast=True)
+            emit("auth_ok", {"user_id": user.id, "username": user.username})
+    else:
+        emit("auth_required", {"message": "Please log in"})
 
 
 @socketio.on("disconnect")
 def on_disconnect():
-    if "user_id" in session:
-        user = current_user()
+    uid = sid_to_user.pop(request.sid, None)
+    if uid:
+        user = db.session.get(User, uid)
         if user:
             user.is_online = False
             user.last_seen = datetime.now(timezone.utc)
@@ -282,6 +334,12 @@ def on_disconnect():
 
 @socketio.on("join")
 def on_join(data):
+    """Join a public room room_id."""
+    uid = sid_to_user.get(request.sid)
+    if not uid:
+        emit("error", {"message": "Not authenticated"})
+        return
+
     room_id = data.get("room_id")
     if room_id:
         join_room(str(room_id))
@@ -298,10 +356,15 @@ def on_leave(data):
 @socketio.on("send_message")
 def on_send_message(data):
     """Handle incoming chat messages (public room or DM)."""
-    if "user_id" not in session:
+    uid = sid_to_user.get(request.sid)
+    if not uid:
+        emit("error", {"message": "Not authenticated"})
         return
 
-    user = current_user()
+    user = db.session.get(User, uid)
+    if not user:
+        return
+
     content = (data.get("content") or "").strip()
     room_id = data.get("room_id")
     recipient_id = data.get("recipient_id")
@@ -316,9 +379,10 @@ def on_send_message(data):
     payload = msg.to_dict()
 
     if room_id:
+        # Public room: broadcast to room (includes sender)
         emit("new_message", payload, room=str(room_id))
     elif recipient_id:
-        # DM: send to both sender and recipient rooms (user id as room)
+        # DM: send to both sender and recipient personal rooms
         emit("new_message", payload, room=str(user.id))
         emit("new_message", payload, room=str(recipient_id))
 
