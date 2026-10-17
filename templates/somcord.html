@@ -5,24 +5,26 @@
 {% block extra_css %}
 <style>
     :root {
-        --bg: #2f3136;
+        --bg: #292b2f;
         --sidebar: #2f3136;
         --channel-sidebar: #2f3136;
         --main: #36393f;
         --chat: #36393f;
         --input: #40444b;
         --text: #dcddde;
-        --text-muted: #72767d;
+        --text-muted: #8e9297;
         --accent: #5865f2;
         --accent-hover: #4752c4;
-        --online: #43b581;
+        --online: #3ba55c;
         --idle: #faa81a;
-        --dnd: #f04747;
+        --dnd: #ed4245;
         --offline: #747f8d;
         --border: #202225;
         --radius: 8px;
         --transition: all 0.15s ease;
         --universal: #5865f2;
+        --white: #ffffff;
+        --black: #000000;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -48,13 +50,14 @@
         position: sticky;
         top: 0;
         z-index: 100;
+        backdrop-filter: blur(4px);
     }
 
     .logo {
         font-size: 20px;
         font-weight: 700;
         color: var(--accent);
-        letter-spacing: -1px;
+        letter-spacing: -0.5px;
         cursor: pointer;
         display: flex;
         align-items: center;
@@ -75,6 +78,7 @@
         padding: 7px 12px;
         font-size: 14px;
         outline: none;
+        transition: var(--transition);
     }
     .search input:focus { border-color: var(--accent); }
 
@@ -162,6 +166,7 @@
         transition: var(--transition);
         color: var(--text-muted);
         border: 2px solid transparent;
+        position: relative;
     }
     .server-item:hover {
         background: rgba(255,255,255,0.05);
@@ -189,7 +194,7 @@
     }
     .server-add:hover { background: rgba(255,255,255,0.1); color: var(--text); }
 
-    /* DMs */
+    /* DMs / Friends */
     .dm-list-header {
         display: flex;
         justify-content: space-between;
@@ -591,21 +596,6 @@
     .status-dot.dnd { background: var(--dnd); }
     .status-dot.offline { background: var(--offline); }
 
-    /* ---------- Friends Sidebar (DMs replaced by Friends on mobile?) ---------- */
-    .friends-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 0 12px 8px;
-    }
-    .friends-header h3 {
-        font-size: 11px;
-        font-weight: 700;
-        color: var(--text-muted);
-        text-transform: uppercase;
-        letter-spacing: 0.8px;
-    }
-
     /* ---------- Auth Overlay ---------- */
     .auth-required {
         display: none;
@@ -703,7 +693,7 @@
     .btn-save:hover { background: var(--accent-hover); }
     .btn-save:disabled { background: #4f545c; cursor: not-allowed; }
 
-    /* Friend request item in modal */
+    /* Friend request item */
     .friend-request-item {
         display: flex;
         align-items: center;
@@ -745,9 +735,40 @@
         cursor: pointer;
     }
     .friend-request-item .btn-accept { background: var(--online); color: #fff; }
-    .friend-request-item .btn-accept:hover { background: #3ba55c; }
-    .friend-request-item .btn-decline { background: rgba(240,71,71,0.2); color: #f04747; }
-    .friend-request-item .btn-decline:hover { background: rgba(240,71,71,0.3); }
+    .friend-request-item .btn-accept:hover { background: #328f4a; }
+    .friend-request-item .btn-decline { background: rgba(237,66,69,0.2); color: #ed4245; }
+    .friend-request-item .btn-decline:hover { background: rgba(237,66,69,0.3); }
+
+    /* Toast notifications */
+    .toast-container {
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 1000;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        pointer-events: none;
+    }
+    .toast {
+        background: rgba(0,0,0,0.85);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        color: #fff;
+        padding: 10px 16px;
+        font-size: 14px;
+        font-weight: 500;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        pointer-events: auto;
+        animation: slideIn 0.2s ease;
+    }
+    @keyframes slideIn {
+        from { transform: translateX(-50%) translateY(20px); opacity: 0; }
+        to { transform: translateX(-50%) translateY(0); opacity: 1; }
+    }
+    .toast.success { border-left: 3px solid var(--online); }
+    .toast.error { border-left: 3px solid var(--dnd); }
 
     /* Hamburger menu for mobile */
     .hamburger {
@@ -819,6 +840,8 @@
 
 <div class="mobile-overlay" onclick="toggleSidebar()"></div>
 
+<div id="toastContainer"></div>
+
 <div class="somcord-layout">
     <!-- Left Sidebar: Servers + Friends/DMs -->
     <aside class="left-sidebar" id="leftSidebar">
@@ -831,6 +854,7 @@
                 </div>
                 {% endfor %}
                 <div class="server-add" onclick="openCreateServerModal()">+</div>
+                <div class="server-add" onclick="openJoinServerModal()" style="margin-top:6px;">➕</div>
             </div>
         </div>
         <div class="sidebar-section">
@@ -1007,6 +1031,23 @@
     const friendsList = document.getElementById("friendsList");
     const serverList = document.getElementById("serverList");
 
+    // Toast notification
+    function showToast(message, type = 'success') {
+        const container = document.getElementById('toastContainer') || createToastContainer();
+        const toast = document.createElement('div');
+        toast.className = `toast ${type}`;
+        toast.textContent = message;
+        container.appendChild(toast);
+        setTimeout(() => toast.remove(), 3000);
+    }
+    function createToastContainer() {
+        const c = document.createElement('div');
+        c.id = 'toastContainer';
+        c.className = 'toast-container';
+        document.body.appendChild(c);
+        return c;
+    }
+
     // ---------- Mobile sidebar toggle ----------
     function toggleSidebar() {
         leftSidebar.classList.toggle("open");
@@ -1044,6 +1085,7 @@
 
     socket.on("error", (data) => {
         console.log("[Socket] Error:", data);
+        showToast(data.message || "Socket error", 'error');
     });
 
     socket.on("new_message", (msg) => {
@@ -1123,8 +1165,9 @@
             memberSidebar.style.display = "flex";
         } catch (e) {
             console.error("Failed to load server data:", e);
+            showToast("Failed to load server", 'error');
         }
-        toggleSidebar(); // close mobile sidebar
+        toggleSidebar();
     }
 
     function renderChannels(channels) {
@@ -1211,6 +1254,7 @@
             renderMessages(msgs);
         } catch (e) {
             console.error("Failed to load messages:", e);
+            showToast("Failed to load messages", 'error');
         }
 
         socket.emit("join_channel", { channel_id: channelId });
@@ -1238,6 +1282,7 @@
             renderMessages(msgs);
         } catch (e) {
             console.error("Failed to load DM:", e);
+            showToast("Failed to load messages", 'error');
         }
         toggleSidebar();
     }
@@ -1332,13 +1377,14 @@
             });
             if (res.ok) {
                 closeCreateServerModal();
-                location.reload();
+                showToast("Server created!", 'success');
+                setTimeout(() => location.reload(), 500);
             } else {
                 const json = await res.json();
-                alert(json.error || "Failed to create server");
+                showToast(json.error || "Failed to create server", 'error');
             }
         } catch (e) {
-            alert("Error creating server");
+            showToast("Error creating server", 'error');
         }
     }
 
@@ -1366,13 +1412,14 @@
             });
             if (res.ok) {
                 closeJoinServerModal();
-                location.reload();
+                showToast("Joined server!", 'success');
+                setTimeout(() => location.reload(), 500);
             } else {
                 const json = await res.json();
-                alert(json.error || "Failed to join server");
+                showToast(json.error || "Failed to join server", 'error');
             }
         } catch (e) {
-            alert("Error joining server");
+            showToast("Error joining server", 'error');
         }
     }
 
@@ -1400,13 +1447,14 @@
             });
             if (res.ok) {
                 closeAddFriendModal();
-                location.reload();
+                showToast("Friend request sent!", 'success');
+                setTimeout(() => location.reload(), 500);
             } else {
                 const json = await res.json();
-                alert(json.error || "Failed to send request");
+                showToast(json.error || "Failed to send request", 'error');
             }
         } catch (e) {
-            alert("Error adding friend");
+            showToast("Error sending request", 'error');
         }
     }
 
@@ -1441,10 +1489,10 @@
                 selectServer(selectedServerId, document.querySelector(`.server-item.active`).querySelector("span").textContent);
             } else {
                 const json = await res.json();
-                alert(json.error || "Failed to create channel");
+                showToast(json.error || "Failed to create channel", 'error');
             }
         } catch (e) {
-            alert("Error creating channel");
+            showToast("Error creating channel", 'error');
         }
     }
 

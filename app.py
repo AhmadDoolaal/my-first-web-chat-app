@@ -347,6 +347,10 @@ def api_create_server():
     db.session.add(server)
     db.session.flush()
 
+    # Auto-create a default "general" text channel
+    general_channel = Channel(name="general", type="text", server_id=server.id, position=0)
+    db.session.add(general_channel)
+
     membership = ServerMember(user_id=user.id, server_id=server.id, role="Owner")
     db.session.add(membership)
     db.session.commit()
