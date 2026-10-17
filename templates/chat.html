@@ -215,6 +215,23 @@
     }
     .create-room-btn:hover { border-color: var(--accent); color: var(--accent); }
 
+    /* Global room styling */
+    .global-room {
+        background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(239, 68, 68, 0.05));
+        border-color: var(--accent);
+    }
+    .global-badge {
+        margin-left: auto;
+        font-size: 10px;
+        font-weight: 800;
+        padding: 2px 8px;
+        border-radius: 6px;
+        background: var(--accent);
+        color: #fff;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
     .auth-required {
         display: none;
         flex-direction: column;
@@ -256,9 +273,12 @@
         <h3>Rooms</h3>
         <div id="roomsList">
             {% for room in rooms %}
-            <div class="room-item" data-room-id="{{ room.id }}" onclick="selectRoom({{ room.id }}, '{{ room.name | e }}')">
-                <span>#</span>
+            <div class="room-item {{ 'global-room' if '🌍' in room.name else '' }}" data-room-id="{{ room.id }}" onclick="selectRoom({{ room.id }}, '{{ room.name | e }}')">
+                <span>{{ '🌍' if '🌍' in room.name else '#' }}</span>
                 <span>{{ room.name }}</span>
+                {% if '🌍' in room.name %}
+                <span class="global-badge">EVERYONE</span>
+                {% endif %}
             </div>
             {% endfor %}
         </div>
@@ -545,6 +565,24 @@
         }
     });
 
+    // Auto-select the Global room on load so everyone starts in "Talk to Everybody"
+    function autoSelectGlobalRoom() {
+        const globalItem = roomsList.querySelector(".global-room");
+        if (globalItem) {
+            const roomId = parseInt(globalItem.dataset.roomId);
+            const roomName = globalItem.querySelector("span:last-child").textContent.replace("EVERYONE", "").trim();
+            selectRoom(roomId, roomName);
+        }
+    }
+
     console.log("[Chat] Initializing for user", currentUserId);
+
+    // Defer auto-select until socket is ready and UI is shown
+    const initCheck = setInterval(() => {
+        if (isAuthenticated && isSocketReady) {
+            clearInterval(initCheck);
+            autoSelectGlobalRoom();
+        }
+    }, 200);
 </script>
 {% endblock%}

@@ -314,6 +314,10 @@ def on_connect():
             db.session.commit()
             # Join personal room so DMs work
             join_room(str(user.id))
+            # Auto-join everyone to the global "Talk to Everybody" room
+            global_room = Room.query.filter_by(name="🌍 Global").first()
+            if global_room:
+                join_room(str(global_room.id))
             emit("user_status", {"user_id": user.id, "is_online": True}, broadcast=True)
             emit("auth_ok", {"user_id": user.id, "username": user.username})
     else:
@@ -393,4 +397,13 @@ def on_send_message(data):
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
+        # Ensure the "Talk to Everybody" global room exists
+        if not Room.query.filter_by(name="🌍 Global").first():
+            global_room = Room(
+                name="🌍 Global",
+                is_private=False,
+                created_by=1,  # will be fixed on first user creation if needed
+            )
+            db.session.add(global_room)
+            db.session.commit()
     socketio.run(app, host="127.0.0.1", port=5001, debug=True)
