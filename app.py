@@ -1,17 +1,20 @@
 """
-Discord Clone — Real-Time Chat Application
-------------------------------------------
-A full-stack Discord replica built with Python, Flask, Flask-SocketIO, and SQLite.
+Somcord — Real-Time Chat Application (Discord Clone)
+----------------------------------------------------
+A full-stack Somcord replica built with Python, Flask, Flask-SocketIO, and SQLite.
 
 Features:
 - Servers (guilds) with text & voice channels
-- Direct Messages between users
-- User registration & login (hashed passwords)
+- Universal chat channel (everyone can post)
+- Direct Messages between friends
+- Add friend / friend request system
+- User registration & login (unique usernames, hashed passwords)
 - Real-time messaging via WebSockets
 - Online/Idle/Do Not Disturb/Offline status
 - Member list with roles
 - Colored avatars with initials
-- Discord dark theme UI
+- Fully responsive UI (mobile-friendly)
+- Somcord dark theme
 """
 
 import os
@@ -38,7 +41,7 @@ if not hasattr(RequestContext, "session_setter_patched"):
             return {}
 
     def _session_setter(self, value):
-        pass  # Ignore — we track users via sid_to_user mapping
+        pass
 
     RequestContext.session = property(_session_getter, _session_setter)
     RequestContext.session_setter_patched = True
@@ -50,20 +53,21 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
-app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{os.path.join(BASE_DIR, 'instance', 'discord.db')}"
+app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{os.path.join(BASE_DIR, 'instance', 'somcord.db')}"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-# Map socket.io session IDs to user IDs
 sid_to_user = {}
 
-# Discord avatar colors
 AVATAR_COLORS = [
     "#5865f2", "#eb459e", "#f04747", "#faa81a", "#43b581",
     "#a3a3a3", "#99aab5", "#7289da", "#5b6aae", "#4f545c",
 ]
+
+UNIVERSAL_CHANNEL_NAME = "🌍 universal"
+
 
 # --------------------------------------------------------------------------- #
 # Database models
@@ -73,18 +77,40 @@ class User(db.Model):
     username = db.Column(db.String(80), unique=True, nullable=False, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
     avatar_color = db.Column(db.String(20), nullable=False)
-    status = db.Column(db.String(20), nullable=False, default="online")  # online, idle, dnd, offline
+    status = db.Column(db.String(20), nullable=False, default="online")
     custom_status = db.Column(db.String(100), nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     server_memberships = db.relationship("ServerMember", back_populates="user", cascade="all, delete-orphan")
     messages = db.relationship("Message", back_populates="author", foreign_keys="Message.user_id", cascade="all, delete-orphan")
 
+    # Friends (accepted friendships where this user is user1 or user2)
+    friendships_sent = db.relationship("Friendship", foreign_keys="Friendship.user1_id", back_populates="user1", cascade="all, delete-orphan")
+    friendships_received = db.relationship("Friendship", foreign_keys="Friendship.user2_id", back_populates="user2", cascade="all, delete-orphan")
+
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
 
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
+
+    def is_friends_with(self, other_id):
+        return db.session.query(Friendship).filter(
+            Friendship.status == "accepted",
+            or_(
+                and_(Friendship.user1_id == self.id, Friendship.user2_id == other_id),
+                and_(Friendship.user1_id == other_id, Friendship.user2_id == self.id),
+            ),
+        ).first() is not None
+
+    def has_pending_request_with(self, other_id):
+        return db.session.query(Friendship).filter(
+            Friendship.status == "pending",
+            or_(
+                and_(Friendship.user1_id == self.id, Friendship.user2_id == other_id),
+                and_(Friendship.user1_id == other_id, Friendship.user2_id == self.id),
+            ),
+        ).first()
 
     def to_dict(self):
         return {
@@ -100,7 +126,7 @@ class User(db.Model):
 class Server(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
-    icon = db.Column(db.String(10), nullable=True)  # emoji
+    icon = db.Column(db.String(10), nullable=True)
     owner_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -127,20 +153,12 @@ class ServerMember(db.Model):
     user = db.relationship("User", back_populates="server_memberships")
     server = db.relationship("Server", back_populates="members")
 
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "user_id": self.user_id,
-            "server_id": self.server_id,
-            "role": self.role,
-        }
-
 
 class Channel(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
-    type = db.Column(db.String(20), nullable=False, default="text")  # text, voice
-    server_id = db.Column(db.Integer, db.ForeignKey("server.id"), nullable=False)
+    type = db.Column(db.String(20), nullable=False, default="text")
+    server_id = db.Column(db.Integer, db.ForeignKey("server.id"), nullable=True)  # None = universal channel
     position = db.Column(db.Integer, default=0)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -160,7 +178,7 @@ class Message(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     channel_id = db.Column(db.Integer, db.ForeignKey("channel.id"), nullable=True)
-    recipient_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)  # DMs
+    recipient_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
     content = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -181,6 +199,17 @@ class Message(db.Model):
             "content": self.content,
             "created_at": self.created_at.isoformat(),
         }
+
+
+class Friendship(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user1_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    user2_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    status = db.Column(db.String(20), nullable=False, default="pending")  # pending, accepted, declined
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+    user1 = db.relationship("User", foreign_keys=[user1_id], back_populates="friendships_sent")
+    user2 = db.relationship("User", foreign_keys=[user2_id], back_populates="friendships_received")
 
 
 # --------------------------------------------------------------------------- #
@@ -222,10 +251,12 @@ def register():
 
         if not username or not password:
             return render_template("register.html", error="Username and password required.")
-        if User.query.filter_by(username=username).first():
-            return render_template("register.html", error="Username already taken.")
+        if len(username) < 2 or len(username) > 32:
+            return render_template("register.html", error="Username must be 2–32 characters.")
         if len(password) < 4:
             return render_template("register.html", error="Password must be at least 4 characters.")
+        if User.query.filter_by(username=username).first():
+            return render_template("register.html", error="Username already taken. Please choose another.")
 
         user = User(username=username, avatar_color=random.choice(AVATAR_COLORS))
         user.set_password(password)
@@ -263,7 +294,6 @@ def logout():
         user = db.session.get(User, uid)
         if user:
             user.status = "offline"
-            user.last_seen = datetime.now(timezone.utc)
             db.session.commit()
     session.clear()
     return redirect(url_for("login"))
@@ -277,18 +307,20 @@ def dashboard():
         session.clear()
         return redirect(url_for("login"))
 
-    # Servers user is member of
     memberships = ServerMember.query.filter_by(user_id=user.id).all()
     servers = [m.server for m in memberships]
 
-    # All other users for DMs
     other_users = User.query.filter(User.id != user.id).all()
 
+    # Get universal channel
+    universal = Channel.query.filter_by(server_id=None, name=UNIVERSAL_CHANNEL_NAME).first()
+
     return render_template(
-        "discord.html",
+        "somcord.html",
         user=user,
         servers=[s.to_dict() for s in servers],
         users=[u.to_dict() for u in other_users],
+        universal=universal.to_dict() if universal else None,
     )
 
 
@@ -315,11 +347,46 @@ def api_create_server():
     db.session.add(server)
     db.session.flush()
 
-    # Add creator as Owner
     membership = ServerMember(user_id=user.id, server_id=server.id, role="Owner")
     db.session.add(membership)
     db.session.commit()
     return jsonify(server.to_dict()), 201
+
+
+@app.route("/api/servers/join", methods=["POST"])
+@login_required
+def api_join_server():
+    data = request.get_json(silent=True) or {}
+    server_id = data.get("server_id")
+    if not server_id:
+        return jsonify({"error": "Server ID required"}), 400
+
+    server = db.session.get(Server, server_id)
+    if not server:
+        return jsonify({"error": "Server not found"}), 404
+
+    user = current_user()
+    existing = ServerMember.query.filter_by(user_id=user.id, server_id=server_id).first()
+    if existing:
+        return jsonify({"error": "Already a member"}), 400
+
+    membership = ServerMember(user_id=user.id, server_id=server.id, role="Member")
+    db.session.add(membership)
+    db.session.commit()
+    return jsonify(server.to_dict()), 200
+
+
+@app.route("/api/servers/list")
+@login_required
+def api_list_servers():
+    """List all public servers available to join."""
+    servers = Server.query.all()
+    result = []
+    for s in servers:
+        d = s.to_dict()
+        d["member_count"] = ServerMember.query.filter_by(server_id=s.id).count()
+        result.append(d)
+    return jsonify(result)
 
 
 @app.route("/api/servers/<int:server_id>/channels")
@@ -328,7 +395,6 @@ def api_channels(server_id):
     server = db.session.get(Server, server_id)
     if not server:
         abort(404)
-    # Check membership
     member = ServerMember.query.filter_by(user_id=current_user().id, server_id=server_id).first()
     if not member:
         abort(403)
@@ -380,9 +446,11 @@ def api_channel_messages(channel_id):
     channel = db.session.get(Channel, channel_id)
     if not channel:
         abort(404)
-    member = ServerMember.query.filter_by(user_id=current_user().id, server_id=channel.server_id).first()
-    if not member:
-        abort(403)
+    # Universal channel (server_id=None) is open to all
+    if channel.server_id is not None:
+        member = ServerMember.query.filter_by(user_id=current_user().id, server_id=channel.server_id).first()
+        if not member:
+            abort(403)
     msgs = (
         Message.query.filter_by(channel_id=channel_id)
         .order_by(Message.created_at.asc())
@@ -399,6 +467,8 @@ def api_dm_messages(other_user_id):
     other = db.session.get(User, other_user_id)
     if not other:
         abort(404)
+    if not me.is_friends_with(other_user_id):
+        return jsonify({"error": "You must be friends to DM"}), 403
     msgs = (
         Message.query.filter(
             Message.channel_id.is_(None),
@@ -414,13 +484,107 @@ def api_dm_messages(other_user_id):
     return jsonify([m.to_dict() for m in msgs])
 
 
+# ----- Friends API -----
+@app.route("/api/friends")
+@login_required
+def api_friends():
+    me = current_user()
+    friendships = db.session.query(Friendship).filter(
+        Friendship.status == "accepted",
+        or_(Friendship.user1_id == me.id, Friendship.user2_id == me.id),
+    ).all()
+
+    friends = []
+    for f in friendships:
+        other_id = f.user2_id if f.user1_id == me.id else f.user1_id
+        other = db.session.get(User, other_id)
+        if other:
+            d = other.to_dict()
+            d["since"] = f.created_at.isoformat()
+            friends.append(d)
+    return jsonify(friends)
+
+
+@app.route("/api/friends/requests")
+@login_required
+def api_friend_requests():
+    me = current_user()
+    requests = db.session.query(Friendship).filter(
+        Friendship.user2_id == me.id,
+        Friendship.status == "pending",
+    ).all()
+
+    result = []
+    for r in requests:
+        u = r.user1.to_dict()
+        u["request_id"] = r.id
+        result.append(u)
+    return jsonify(result)
+
+
+@app.route("/api/friends/sent")
+@login_required
+def api_sent_requests():
+    me = current_user()
+    requests = db.session.query(Friendship).filter(
+        Friendship.user1_id == me.id,
+        Friendship.status == "pending",
+    ).all()
+    return jsonify([{"id": r.id, "user": r.user2.to_dict()} for r in requests])
+
+
+@app.route("/api/friends/add", methods=["POST"])
+@login_required
+def api_add_friend():
+    data = request.get_json(silent=True) or {}
+    target_username = (data.get("username") or "").strip()
+    if not target_username:
+        return jsonify({"error": "Username required"}), 400
+
+    me = current_user()
+    target = User.query.filter_by(username=target_username).first()
+    if not target:
+        return jsonify({"error": "User not found"}), 404
+    if target.id == me.id:
+        return jsonify({"error": "Cannot add yourself"}), 400
+    if me.is_friends_with(target.id):
+        return jsonify({"error": "Already friends"}), 400
+    if me.has_pending_request_with(target.id):
+        return jsonify({"error": "Request already pending"}), 400
+
+    friendship = Friendship(user1_id=me.id, user2_id=target.id, status="pending")
+    db.session.add(friendship)
+    db.session.commit()
+    return jsonify({"status": "sent", "target": target.to_dict()}), 201
+
+
+@app.route("/api/friends/requests/<int:request_id>/accept", methods=["POST"])
+@login_required
+def api_accept_friend(request_id):
+    me = current_user()
+    friendship = db.session.get(Friendship, request_id)
+    if not friendship or friendship.user2_id != me.id:
+        return jsonify({"error": "Request not found"}), 404
+    friendship.status = "accepted"
+    db.session.commit()
+    return jsonify({"status": "accepted"})
+
+
+@app.route("/api/friends/requests/<int:request_id>/decline", methods=["POST"])
+@login_required
+def api_decline_friend(request_id):
+    me = current_user()
+    friendship = db.session.get(Friendship, request_id)
+    if not friendship or friendship.user2_id != me.id:
+        return jsonify({"error": "Request not found"}), 404
+    friendship.status = "declined"
+    db.session.commit()
+    return jsonify({"status": "declined"})
+
+
 # --------------------------------------------------------------------------- #
 # SocketIO events
 # --------------------------------------------------------------------------- #
-def get_user_from_sid(sid):
-    return sid_to_user.get(sid)
-
-
 @socketio.on("connect")
 def on_connect():
     uid = session.get("user_id")
@@ -430,7 +594,7 @@ def on_connect():
             sid_to_user[request.sid] = user.id
             user.status = "online"
             db.session.commit()
-            join_room(str(user.id))  # personal room for DMs
+            join_room(str(user.id))
             emit("auth_ok", {"user_id": user.id, "username": user.username})
             emit("user_status", {"user_id": user.id, "status": "online"}, broadcast=True)
     else:
@@ -502,4 +666,9 @@ def on_send_message(data):
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
+        # Create universal channel for everyone
+        if not Channel.query.filter_by(server_id=None, name=UNIVERSAL_CHANNEL_NAME).first():
+            universal = Channel(name=UNIVERSAL_CHANNEL_NAME, type="text", server_id=None)
+            db.session.add(universal)
+            db.session.commit()
     socketio.run(app, host="127.0.0.1", port=5001, debug=True)
